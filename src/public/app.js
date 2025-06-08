@@ -159,46 +159,20 @@ async function handleLogin(event) {
 
 async function handleLogout() {
     try {
-        // Déconnecter le socket avant la déconnexion
+        await apiRequest('/api/auth/logout', {
+            method: 'POST'
+        });
+
         if (socket) {
             socket.disconnect();
-            socket = null;
         }
 
-        // Appeler l'API de déconnexion
-        const response = await fetch('/api/auth/logout', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            credentials: 'include'
-        });
-
-        if (!response.ok) {
-            throw new Error('Erreur lors de la déconnexion');
-        }
-
-        // Réinitialiser l'état de l'application
-        currentUser = null;
         localStorage.removeItem('token');
-
-        // Supprimer les cookies de session
-        document.cookie.split(";").forEach(function (c) {
-            document.cookie = c.replace(/^ +/, "").replace(/=.*/, "=;expires=" + new Date().toUTCString() + ";path=/");
-        });
-
-        // Rediriger vers la page de connexion
+        currentUser = null;
         showPage('login');
-
-        // Réinitialiser le formulaire de connexion
-        const loginForm = document.getElementById('loginForm');
-        if (loginForm) {
-            loginForm.reset();
-        }
-
-        showToast('Déconnexion', 'Vous avez été déconnecté avec succès', 'success');
+        showToast('Succès', 'Déconnexion réussie', 'success');
     } catch (error) {
-        console.error('Erreur de déconnexion:', error);
+        console.error('Erreur lors de la déconnexion:', error);
         showToast('Erreur', 'Impossible de se déconnecter', 'danger');
     }
 }
@@ -624,55 +598,65 @@ function showToast(title, message, type = 'info') {
     });
 }
 
-// Initialisation de Socket.IO
+// Configuration de Socket.IO
 function initializeSocket() {
-    socket = io({
-        auth: {
-            token: document.cookie.split('; ').find(row => row.startsWith('token='))?.split('=')[1]
-        }
-    });
+    try {
+        socket = io();
 
-    socket.on('connect', () => {
-        console.log('Connecté au serveur WebSocket');
-    });
+        socket.on('connect', () => {
+            console.log('Connecté au serveur');
+            if (currentUser) {
+                socket.emit('authenticate', { token: localStorage.getItem('token') });
+            }
+        });
 
-    socket.on('disconnect', () => {
-        console.log('Déconnecté du serveur WebSocket');
-    });
+        socket.on('disconnect', () => {
+            console.log('Déconnecté du serveur');
+        });
 
-    socket.on('deviceUpdate', (device) => {
-        loadDevices();
-    });
+        socket.on('error', (error) => {
+            console.error('Erreur Socket.IO:', error);
+            showToast('Erreur', error.message, 'danger');
+        });
 
-    socket.on('alert', (alert) => {
-        showToast('Alerte', alert.message, 'warning');
-    });
+        socket.on('session:expired', () => {
+            handleSessionExpired();
+        });
+
+        socket.on('metrics-update', (data) => {
+            updateMetrics(data);
+        });
+
+        socket.on('devices-update', (devices) => {
+            updateDevicesList(devices);
+        });
+
+        socket.on('alert', (alert) => {
+            showAlert(alert);
+        });
+
+    } catch (error) {
+        console.error('Erreur lors de l\'initialisation de Socket.IO:', error);
+        showToast('Erreur', 'Impossible de se connecter au serveur en temps réel', 'danger');
+    }
 }
 
 // Gestion de la session expirée
 function handleSessionExpired() {
-    // Déconnecter le socket
     if (socket) {
         socket.disconnect();
-        socket = null;
     }
 
-    // Nettoyer les données de session
     localStorage.removeItem('token');
     currentUser = null;
 
-    // Afficher le toast
-    const toast = new bootstrap.Toast(document.getElementById('sessionExpiredToast'));
-    toast.show();
-
-    // Rediriger vers la page de connexion
-    showPage('login');
-
-    // Réinitialiser le formulaire de connexion
-    const loginForm = document.getElementById('loginForm');
-    if (loginForm) {
-        loginForm.reset();
+    const toast = document.getElementById('sessionExpiredToast');
+    if (toast) {
+        const bsToast = new bootstrap.Toast(toast);
+        bsToast.show();
     }
+
+    showPage('login');
 }
 
 // Écouter les événements de session expirée du serveur
@@ -729,4 +713,88 @@ async function apiRequest(url, options = {}) {
     }
 
     return response.json();
-} 
+}
+
+// Initialisation de l'application
+async function initializeApp() {
+    try {
+        // Vérifier l'authentification
+        const token = localStorage.getItem('token');
+        if (token) {
+            const response = await apiRequest('/api/auth/verify', {
+                method: 'GET'
+            });
+            if (response.valid) {
+                currentUser = response.user;
+                showPage('dashboard');
+            } else {
+                handleSessionExpired();
+            }
+        } else {
+            showPage('login');
+        }
+
+        // Initialiser Socket.IO
+        initializeSocket();
+
+        // Configurer les événements
+        setupEventListeners();
+
+    } catch (error) {
+        console.error('Erreur lors de l\'initialisation:', error);
+        showToast('Erreur', 'Impossible d\'initialiser l\'application', 'danger');
+        showPage('login');
+    }
+}
+
+// Fonction pour envoyer un message via Socket.IO
+function emitSocketEvent(event, data) {
+    if (socket && socket.connected) {
+        socket.emit(event, data);
+    } else {
+        console.warn('Socket non connecté, tentative de reconnexion...');
+        initializeSocket();
+    }
+}
+
+// Fonction pour gérer la déconnexion
+async function handleLogout() {
+    try {
+        await apiRequest('/api/auth/logout', {
+            method: 'POST'
+        });
+
+        if (socket) {
+            socket.disconnect();
+        }
+
+        localStorage.removeItem('token');
+        currentUser = null;
+        showPage('login');
+        showToast('Succès', 'Déconnexion réussie', 'success');
+    } catch (error) {
+        console.error('Erreur lors de la déconnexion:', error);
+        showToast('Erreur', 'Impossible de se déconnecter', 'danger');
+    }
+}
+
+// Fonction pour gérer l'expiration de session
+function handleSessionExpired() {
+    if (socket) {
+        socket.disconnect();
+    }
+
+    localStorage.removeItem('token');
+    currentUser = null;
+
+    const toast = document.getElementById('sessionExpiredToast');
+    if (toast) {
+        const bsToast = new bootstrap.Toast(toast);
+        bsToast.show();
+    }
+
+    showPage('login');
+}
+
+// Démarrer l'application
+document.addEventListener('DOMContentLoaded', initializeApp); 

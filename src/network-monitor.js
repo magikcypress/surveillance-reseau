@@ -97,12 +97,15 @@ class NetworkMonitor extends EventEmitter {
     async scanPort(ip, port) {
         return new Promise((resolve) => {
             const socket = new net.Socket();
-            let status = false;
+            let status = 'closed';
+            let service = 'unknown';
 
-            socket.setTimeout(this.timeout);
+            // Timeout après 1 seconde
+            socket.setTimeout(1000);
 
             socket.on('connect', () => {
-                status = true;
+                status = 'open';
+                service = this.getServiceName(port);
                 socket.destroy();
             });
 
@@ -115,11 +118,7 @@ class NetworkMonitor extends EventEmitter {
             });
 
             socket.on('close', () => {
-                resolve({
-                    port,
-                    status,
-                    service: this.getServiceName(port)
-                });
+                resolve({ port, status, service });
             });
 
             socket.connect(port, ip);
@@ -146,23 +145,28 @@ class NetworkMonitor extends EventEmitter {
 
     async scanDevice(ip) {
         try {
-            const portResults = await Promise.all(
-                this.commonPorts.map(port => this.scanPort(ip, port))
-            );
+            // Liste des ports courants à scanner
+            const commonPorts = [21, 22, 23, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995, 3306, 3389, 5432, 8080];
 
-            const openPorts = portResults.filter(result => result.status);
+            // Scanner les ports en parallèle
+            const portScans = commonPorts.map(port => this.scanPort(ip, port));
+            const results = await Promise.all(portScans);
+
+            // Filtrer les ports ouverts
+            const openPorts = results.filter(result => result.status === 'open');
+
             return {
                 ip,
-                openPorts,
-                timestamp: new Date()
+                openPorts: openPorts.map(result => ({
+                    port: result.port,
+                    service: result.service
+                }))
             };
         } catch (error) {
             console.error(`Erreur lors du scan de ${ip}:`, error);
             return {
                 ip,
-                openPorts: [],
-                error: error.message,
-                timestamp: new Date()
+                openPorts: []
             };
         }
     }
