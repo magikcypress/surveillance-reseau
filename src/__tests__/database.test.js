@@ -1,67 +1,103 @@
-const Database = require('../database');
-const sqlite3 = require('sqlite3');
+// Mock de sqlite3 avant l'import de Database
+jest.mock('sqlite3', () => {
+    const mockDb = {
+        run: jest.fn(),
+        get: jest.fn(),
+        all: jest.fn(),
+        serialize: jest.fn((callback) => {
+            callback();
+            return mockDb;
+        }),
+        close: jest.fn()
+    };
 
-jest.mock('sqlite3');
+    const mockVerbose = jest.fn(() => ({
+        Database: jest.fn(() => mockDb)
+    }));
+
+    return {
+        verbose: mockVerbose
+    };
+});
+
+// Mock de path avant l'import de Database
+jest.mock('path', () => ({
+    join: jest.fn(() => 'mock/path/database.sqlite')
+}));
+
+// Mock de bcrypt avant l'import de Database
+jest.mock('bcrypt', () => ({
+    hash: jest.fn(() => Promise.resolve('hashed_password'))
+}));
+
+// Import de Database après les mocks
+const Database = require('../database');
 
 describe('Database', () => {
     let db;
-    const mockRun = jest.fn();
-    const mockAll = jest.fn();
-    const mockGet = jest.fn();
+    let mockDb;
 
     beforeEach(() => {
-        mockRun.mockClear();
-        mockAll.mockClear();
-        mockGet.mockClear();
+        // Réinitialiser tous les mocks
+        jest.clearAllMocks();
 
-        const mockDb = {
-            run: mockRun,
-            all: mockAll,
-            get: mockGet
-        };
-
-        sqlite3.Database.mockImplementation(() => mockDb);
+        // Créer une nouvelle instance de Database
         db = new Database();
+        mockDb = db.db;
     });
 
     describe('updateDevice', () => {
         it('should update device information', async () => {
-            mockRun.mockImplementation((query, params, callback) => {
-                callback(null);
+            const device = {
+                ip: '192.168.1.1',
+                hostname: 'test-device',
+                status: 'online',
+                openPorts: JSON.stringify([80, 443])
+            };
+
+            mockDb.run.mockImplementation((query, params, callback) => {
+                callback(null, { lastID: 1 });
             });
 
-            await db.updateDevice('192.168.1.1', 'test-host', 'online', []);
-            expect(mockRun).toHaveBeenCalled();
+            const result = await db.updateDevice(device);
+            expect(result).toHaveProperty('id', 1);
+            expect(result).toHaveProperty('ip', device.ip);
+            expect(mockDb.run).toHaveBeenCalled();
         });
 
         it('should handle database errors', async () => {
-            mockRun.mockImplementation((query, params, callback) => {
+            const device = {
+                ip: '192.168.1.1',
+                hostname: 'test-device',
+                status: 'online'
+            };
+
+            mockDb.run.mockImplementation((query, params, callback) => {
                 callback(new Error('Database error'));
             });
 
-            await expect(db.updateDevice('192.168.1.1', 'test-host', 'online', []))
-                .rejects
-                .toThrow('Database error');
+            await expect(db.updateDevice(device)).rejects.toThrow('Database error');
         });
     });
 
     describe('getDevices', () => {
         it('should return all devices', async () => {
             const mockDevices = [
-                { ip: '192.168.1.1', status: 'online' },
-                { ip: '192.168.1.2', status: 'offline' }
+                { id: 1, ip: '192.168.1.1', status: 'online' },
+                { id: 2, ip: '192.168.1.2', status: 'offline' }
             ];
 
-            mockAll.mockImplementation((query, callback) => {
+            mockDb.all.mockImplementation((query, callback) => {
                 callback(null, mockDevices);
             });
 
             const devices = await db.getDevices();
             expect(devices).toEqual(mockDevices);
+            expect(mockDb.all).toHaveBeenCalled();
         });
 
         it('should handle database errors', async () => {
-            mockAll.mockImplementation((query, callback) => {
+            mockDb.all.mockImplementation((query, callback) => {
                 callback(new Error('Database error'));
             });
 
@@ -71,44 +107,82 @@ describe('Database', () => {
 
     describe('addMetric', () => {
         it('should add a new metric', async () => {
-            mockRun.mockImplementation((query, params, callback) => {
-                callback(null);
+            const metric = {
+                deviceId: 1,
+                type: 'ping',
+                value: 50
+            };
+
+            mockDb.run.mockImplementation((query, params, callback) => {
+                callback(null, { lastID: 1 });
             });
 
-            await db.addMetric(1, 10.5);
-            expect(mockRun).toHaveBeenCalled();
+            const result = await db.addMetric(metric);
+            expect(result).toHaveProperty('id', 1);
+            expect(result).toHaveProperty('type', metric.type);
+            expect(mockDb.run).toHaveBeenCalled();
         });
 
         it('should handle database errors', async () => {
-            mockRun.mockImplementation((query, params, callback) => {
+            const metric = {
+                deviceId: 1,
+                type: 'ping',
+                value: 50
+            };
+
+            mockDb.run.mockImplementation((query, params, callback) => {
                 callback(new Error('Database error'));
             });
 
-            await expect(db.addMetric(1, 10.5)).rejects.toThrow('Database error');
+            await expect(db.addMetric(metric)).rejects.toThrow('Database error');
         });
     });
 
     describe('getMetrics', () => {
         it('should return metrics for a device', async () => {
             const mockMetrics = [
-                { timestamp: '2024-01-01', value: 10.5 },
-                { timestamp: '2024-01-02', value: 11.2 }
+                { id: 1, deviceId: 1, type: 'ping', value: 50 },
+                { id: 2, deviceId: 1, type: 'ping', value: 45 }
             ];
 
-            mockAll.mockImplementation((query, params, callback) => {
+            mockDb.all.mockImplementation((query, params, callback) => {
                 callback(null, mockMetrics);
             });
 
-            const metrics = await db.getMetrics(1);
+            const metrics = await db.getMetrics(1, 'ping');
             expect(metrics).toEqual(mockMetrics);
+            expect(mockDb.all).toHaveBeenCalledWith(
+                expect.stringContaining('SELECT * FROM metrics'),
+                [1, 'ping'],
+                expect.any(Function)
+            );
         });
 
         it('should handle database errors', async () => {
-            mockAll.mockImplementation((query, params, callback) => {
+            mockDb.all.mockImplementation((query, params, callback) => {
                 callback(new Error('Database error'));
             });
 
-            await expect(db.getMetrics(1)).rejects.toThrow('Database error');
+            await expect(db.getMetrics(1, 'ping')).rejects.toThrow('Database error');
+            expect(mockDb.all).toHaveBeenCalledWith(
+                expect.stringContaining('SELECT * FROM metrics'),
+                [1, 'ping'],
+                expect.any(Function)
+            );
+        });
+
+        it('should return empty array when no metrics found', async () => {
+            mockDb.all.mockImplementation((query, params, callback) => {
+                callback(null, []);
+            });
+
+            const metrics = await db.getMetrics(1, 'ping');
+            expect(metrics).toEqual([]);
+            expect(mockDb.all).toHaveBeenCalledWith(
+                expect.stringContaining('SELECT * FROM metrics'),
+                [1, 'ping'],
+                expect.any(Function)
+            );
         });
     });
 }); 

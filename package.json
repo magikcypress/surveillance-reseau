@@ -11,15 +11,17 @@
         "test:coverage": "jest --coverage"
     },
     "dependencies": {
-        "bcrypt": "^6.0.0",
+        "bcrypt": "^5.1.1",
         "bcryptjs": "^2.4.3",
         "chart.js": "^4.4.1",
         "connect-sqlite3": "^0.9.13",
+        "cors": "^2.8.5",
         "dotenv": "^16.3.1",
         "express": "^4.18.2",
         "express-session": "^1.17.3",
         "jsonwebtoken": "^9.0.2",
         "moment": "^2.29.4",
+        "net": "^1.0.2",
         "node-nmap": "^4.0.0",
         "nodemailer": "^6.9.7",
         "ping": "^0.4.4",
@@ -32,6 +34,9 @@
     },
     "jest": {
         "testEnvironment": "node",
+        "setupFilesAfterEnv": [
+            "./src/__tests__/setup.js"
+        ],
         "coverageDirectory": "coverage",
         "collectCoverageFrom": [
             "src/**/*.js",
@@ -41,8 +46,10 @@
         "testMatch": [
             "**/__tests__/**/*.test.js"
         ],
-        "setupFiles": [
-            "<rootDir>/src/__tests__/setup.js"
-        ]
+        "verbose": true,
+        "forceExit": true,
+        "clearMocks": true,
+        "resetMocks": true,
+        "restoreMocks": true
     }
 }

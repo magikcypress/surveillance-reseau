@@ -8,7 +8,7 @@ class Database {
         this.dbPath = path.join(__dirname, 'data', 'network-monitor.db');
         this.ensureDataDirectory();
         this.db = new sqlite3.Database(this.dbPath);
-        this.init();
+        this.initializeDatabase();
     }
 
     ensureDataDirectory() {
@@ -18,57 +18,82 @@ class Database {
         }
     }
 
-    async init() {
-        await this.initDatabase();
-    }
+    async initializeDatabase() {
+        return new Promise((resolve, reject) => {
+            this.db.serialize(() => {
+                // Table des utilisateurs
+                this.db.run(`
+                    CREATE TABLE IF NOT EXISTS users (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        username TEXT UNIQUE NOT NULL,
+                        password TEXT NOT NULL,
+                        email TEXT UNIQUE NOT NULL,
+                        role TEXT DEFAULT 'user',
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                `);
 
-    async initDatabase() {
-        // Créer la table des utilisateurs
-        await this.db.run(`
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT UNIQUE NOT NULL,
-                password TEXT NOT NULL,
-                email TEXT UNIQUE NOT NULL,
-                role TEXT DEFAULT 'user',
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
+                // Table des appareils
+                this.db.run(`
+                    CREATE TABLE IF NOT EXISTS devices (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ip TEXT UNIQUE,
+                        mac TEXT,
+                        hostname TEXT,
+                        status TEXT,
+                        last_seen DATETIME,
+                        open_ports TEXT,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                `);
 
-        // Créer la table des appareils
-        await this.db.run(`
-            CREATE TABLE IF NOT EXISTS devices (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ip TEXT UNIQUE,
-                mac TEXT,
-                hostname TEXT,
-                status TEXT,
-                last_seen DATETIME,
-                open_ports TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
+                // Table des métriques
+                this.db.run(`
+                    CREATE TABLE IF NOT EXISTS metrics (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        device_id INTEGER NOT NULL,
+                        type TEXT NOT NULL,
+                        value REAL NOT NULL,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (device_id) REFERENCES devices (id)
+                    )
+                `);
 
-        // Créer la table d'historique de latence
-        await this.db.run(`
-            CREATE TABLE IF NOT EXISTS latency_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                latency REAL NOT NULL
-            )
-        `);
+                // Table des tests de vitesse
+                this.db.run(`
+                    CREATE TABLE IF NOT EXISTS speed_tests (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        download REAL NOT NULL,
+                        upload REAL NOT NULL,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                `, async (err) => {
+                    if (err) {
+                        reject(err);
+                        return;
+                    }
 
-        // Créer un utilisateur admin par défaut si aucun utilisateur n'existe
-        try {
-            const adminExists = await this.getUserByUsername('admin');
-            if (!adminExists) {
-                const hashedPassword = await bcrypt.hash('admin', 10);
-                await this.createUser('admin', hashedPassword, 'admin');
-                console.log('Utilisateur admin créé avec succès');
-            }
-        } catch (error) {
-            console.error('Erreur lors de la création de l\'utilisateur admin:', error);
-        }
+                    try {
+                        // Vérifier si un utilisateur admin existe déjà
+                        const adminExists = await this.getUserByUsername('admin');
+                        if (!adminExists) {
+                            // Créer un utilisateur admin par défaut
+                            const hashedPassword = await bcrypt.hash('admin', 10);
+                            await this.createUser({
+                                username: 'admin',
+                                password: hashedPassword,
+                                email: 'admin@example.com',
+                                role: 'admin'
+                            });
+                        }
+                        resolve();
+                    } catch (error) {
+                        console.error('Erreur lors de l\'initialisation de la base de données:', error);
+                        reject(error);
+                    }
+                });
+            });
+        });
     }
 
     // Méthodes pour les utilisateurs
@@ -429,6 +454,43 @@ class Database {
             });
         });
     }
+
+    // Opérations sur les tests de vitesse
+    async saveSpeedTest(speedTest) {
+        return new Promise((resolve, reject) => {
+            this.db.run(
+                'INSERT INTO speed_tests (download, upload) VALUES (?, ?)',
+                [speedTest.download, speedTest.upload],
+                function (err) {
+                    if (err) reject(err);
+                    else resolve({ id: this.lastID, ...speedTest });
+                }
+            );
+        });
+    }
+
+    async getSpeedTestHistory() {
+        return new Promise((resolve, reject) => {
+            this.db.all(
+                'SELECT * FROM speed_tests ORDER BY timestamp DESC LIMIT 100',
+                (err, rows) => {
+                    if (err) reject(err);
+                    else resolve(rows);
+                }
+            );
+        });
+    }
+
+    // Fermeture de la connexion
+    close() {
+        return new Promise((resolve, reject) => {
+            this.db.close((err) => {
+                if (err) reject(err);
+                else resolve();
+            });
+        });
+    }
 }
 
-module.exports = new Database(); 
+// Exporter la classe Database
+module.exports = Database; 

@@ -1,196 +1,171 @@
 const jwt = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');
+const bcrypt = require('bcrypt');
 const db = require('./database');
 
 class Auth {
     constructor() {
-        this.secret = process.env.JWT_SECRET || 'your-secret-key';
-        if (!this.secret || this.secret === 'your-secret-key') {
-            console.warn('Attention: JWT_SECRET n\'est pas défini dans les variables d\'environnement');
+        this.jwtSecret = process.env.JWT_SECRET || 'your-secret-key';
+        if (!this.jwtSecret) {
+            console.warn('Warning: JWT_SECRET is not set. Using default secret key.');
         }
         // Lier les méthodes à l'instance
         this.authenticate = this.authenticate.bind(this);
         this.verifyToken = this.verifyToken.bind(this);
     }
 
-    async register(username, password, email) {
+    async register(userData) {
         try {
-            console.log('Tentative d\'inscription pour:', username);
-
-            // Validation des entrées
-            if (!username || !password || !email) {
-                throw new Error('Tous les champs sont requis');
-            }
-
-            if (password.length < 8) {
-                throw new Error('Le mot de passe doit contenir au moins 8 caractères');
-            }
-
-            if (!email.includes('@')) {
-                throw new Error('Email invalide');
-            }
-
             // Vérifier si l'utilisateur existe déjà
-            const existingUser = await db.getUser(username);
+            const existingUser = await db.getUserByUsername(userData.username);
             if (existingUser) {
-                throw new Error('Cet utilisateur existe déjà');
+                throw new Error('Username already exists');
             }
 
             // Hasher le mot de passe
-            const hashedPassword = await bcrypt.hash(password, 10);
+            const hashedPassword = await bcrypt.hash(userData.password, 10);
 
             // Créer l'utilisateur
-            const userId = await db.createUser(username, hashedPassword, email);
-            console.log('Utilisateur créé avec l\'ID:', userId);
+            const user = await db.createUser({
+                username: userData.username,
+                password: hashedPassword,
+                role: userData.role || 'user'
+            });
 
-            // Générer le token JWT
-            const token = this.generateToken(userId, username);
-            console.log('Token généré pour:', username);
+            // Générer le token
+            const token = this.generateToken(user);
 
             return {
-                token,
-                userId,
-                username,
-                email,
-                role: 'user'
+                user: {
+                    id: user.id,
+                    username: user.username,
+                    role: user.role
+                },
+                token
             };
         } catch (error) {
-            console.error('Erreur lors de l\'inscription:', error);
-            throw error;
+            console.error('Registration error:', error);
+            throw new Error('Registration failed: ' + error.message);
         }
     }
 
-    async login(username, password) {
+    async login(credentials) {
         try {
-            console.log('Tentative de connexion pour:', username);
-
-            // Validation des entrées
-            if (!username || !password) {
-                throw new Error('Nom d\'utilisateur et mot de passe requis');
-            }
-
-            // Récupérer l'utilisateur
-            const user = await db.getUser(username);
+            // Vérifier les identifiants
+            const user = await db.getUserByUsername(credentials.username);
             if (!user) {
-                throw new Error('Utilisateur non trouvé');
+                throw new Error('Invalid credentials');
             }
 
             // Vérifier le mot de passe
-            const validPassword = await bcrypt.compare(password, user.password);
-            if (!validPassword) {
-                throw new Error('Mot de passe incorrect');
+            const isValid = await bcrypt.compare(credentials.password, user.password);
+            if (!isValid) {
+                throw new Error('Invalid credentials');
             }
 
-            // Générer le token JWT
-            const token = this.generateToken(user.id, user.username);
-            console.log('Token généré pour:', username);
+            // Générer le token
+            const token = this.generateToken(user);
 
             return {
-                token,
-                userId: user.id,
+                user: {
+                    id: user.id,
+                    username: user.username,
+                    role: user.role
+                },
+                token
+            };
+        } catch (error) {
+            console.error('Login error:', error);
+            throw new Error('Login failed: ' + error.message);
+        }
+    }
+
+    generateToken(user) {
+        return jwt.sign(
+            {
+                id: user.id,
                 username: user.username,
-                email: user.email,
+                role: user.role
+            },
+            this.jwtSecret,
+            { expiresIn: '24h' }
+        );
+    }
+
+    async verifyToken(token) {
+        try {
+            const decoded = jwt.verify(token, this.jwtSecret);
+            const user = await db.getUserById(decoded.id);
+
+            if (!user) {
+                throw new Error('User not found');
+            }
+
+            return {
+                id: user.id,
+                username: user.username,
                 role: user.role
             };
         } catch (error) {
-            console.error('Erreur lors de la connexion:', error);
-            throw error;
-        }
-    }
-
-    generateToken(userId, username) {
-        const payload = {
-            userId,
-            username,
-            iat: Math.floor(Date.now() / 1000)
-        };
-        console.log('Génération du token avec payload:', payload);
-        return jwt.sign(payload, this.secret, { expiresIn: '24h' });
-    }
-
-    verifyToken(token) {
-        try {
-            console.log('Vérification du token...');
-            if (!token) {
-                throw new Error('Token manquant');
-            }
-            const decoded = jwt.verify(token, this.secret);
-            console.log('Token décodé:', decoded);
-            return decoded;
-        } catch (error) {
-            console.error('Erreur de vérification du token:', error);
             if (error.name === 'TokenExpiredError') {
-                throw new Error('Token expiré');
+                throw new Error('Token expired');
             }
-            throw new Error('Token invalide');
+            throw new Error('Invalid token');
         }
     }
 
-    authenticate(req, res, next) {
+    async authenticate(req, res, next) {
         try {
-            console.log('Vérification de l\'authentification...');
             const authHeader = req.headers.authorization;
-            console.log('En-tête d\'autorisation:', authHeader);
-
             if (!authHeader) {
-                console.log('En-tête d\'autorisation manquant');
                 return res.status(401).json({
-                    message: 'Token manquant',
+                    error: 'No token provided',
                     code: 'AUTH_NO_TOKEN'
                 });
             }
 
-            const [bearer, token] = authHeader.split(' ');
-            if (bearer !== 'Bearer' || !token) {
-                console.log('Format de token invalide');
+            const token = authHeader.split(' ')[1];
+            if (!token) {
                 return res.status(401).json({
-                    message: 'Format de token invalide',
+                    error: 'Invalid token format',
                     code: 'AUTH_INVALID_FORMAT'
                 });
             }
 
             try {
-                const decoded = this.verifyToken(token);
-                console.log('Token vérifié avec succès');
-
-                // Vérifier si l'utilisateur existe toujours
-                db.getUser(decoded.username)
-                    .then(user => {
-                        if (!user) {
-                            console.log('Utilisateur non trouvé');
-                            return res.status(401).json({
-                                message: 'Utilisateur non trouvé',
-                                code: 'AUTH_USER_NOT_FOUND'
-                            });
-                        }
-                        req.user = decoded;
-                        next();
-                    })
-                    .catch(error => {
-                        console.error('Erreur lors de la vérification de l\'utilisateur:', error);
-                        return res.status(500).json({
-                            message: 'Erreur serveur',
-                            code: 'AUTH_SERVER_ERROR'
-                        });
-                    });
+                const user = await this.verifyToken(token);
+                req.user = user;
+                next();
             } catch (error) {
-                console.error('Erreur de vérification du token:', error);
-                if (error.name === 'TokenExpiredError') {
+                if (error.message === 'Token expired') {
                     return res.status(401).json({
-                        message: 'Token expiré',
+                        error: 'Token expired',
                         code: 'AUTH_TOKEN_EXPIRED'
                     });
                 }
                 return res.status(401).json({
-                    message: 'Token invalide',
+                    error: 'Invalid token',
                     code: 'AUTH_INVALID_TOKEN'
                 });
             }
         } catch (error) {
-            console.error('Erreur d\'authentification:', error);
-            return res.status(401).json({
-                message: 'Non autorisé',
-                code: 'AUTH_ERROR'
+            console.error('Authentication error:', error);
+            return res.status(500).json({
+                error: 'Authentication failed',
+                code: 'AUTH_SERVER_ERROR'
+            });
+        }
+    }
+
+    async logout(req, res) {
+        try {
+            // Dans une implémentation plus avancée, on pourrait invalider le token
+            // Pour l'instant, on se contente de renvoyer une réponse de succès
+            res.json({ message: 'Logged out successfully' });
+        } catch (error) {
+            console.error('Logout error:', error);
+            res.status(500).json({
+                error: 'Logout failed',
+                code: 'AUTH_LOGOUT_ERROR'
             });
         }
     }
