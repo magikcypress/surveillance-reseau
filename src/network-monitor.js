@@ -4,6 +4,7 @@ const dns = require('dns').promises;
 const db = require('./database');
 const config = require('./config');
 const notifier = require('./notifier');
+const net = require('net');
 
 class NetworkMonitor extends EventEmitter {
     constructor(io) {
@@ -14,6 +15,7 @@ class NetworkMonitor extends EventEmitter {
         this.interval = null;
         this.pingInterval = 5000; // 5 secondes
         this.timeout = 2000; // 2 secondes
+        this.commonPorts = [21, 22, 23, 25, 53, 80, 110, 143, 443, 3306, 3389, 8080];
         this.initializeDevices();
     }
 
@@ -92,6 +94,79 @@ class NetworkMonitor extends EventEmitter {
         this.emit('devices-update', Array.from(this.devices.values()));
     }
 
+    async scanPort(ip, port) {
+        return new Promise((resolve) => {
+            const socket = new net.Socket();
+            let status = false;
+
+            socket.setTimeout(this.timeout);
+
+            socket.on('connect', () => {
+                status = true;
+                socket.destroy();
+            });
+
+            socket.on('timeout', () => {
+                socket.destroy();
+            });
+
+            socket.on('error', () => {
+                socket.destroy();
+            });
+
+            socket.on('close', () => {
+                resolve({
+                    port,
+                    status,
+                    service: this.getServiceName(port)
+                });
+            });
+
+            socket.connect(port, ip);
+        });
+    }
+
+    getServiceName(port) {
+        const services = {
+            21: 'FTP',
+            22: 'SSH',
+            23: 'Telnet',
+            25: 'SMTP',
+            53: 'DNS',
+            80: 'HTTP',
+            110: 'POP3',
+            143: 'IMAP',
+            443: 'HTTPS',
+            3306: 'MySQL',
+            3389: 'RDP',
+            8080: 'HTTP-Proxy'
+        };
+        return services[port] || 'Unknown';
+    }
+
+    async scanDevice(ip) {
+        try {
+            const portResults = await Promise.all(
+                this.commonPorts.map(port => this.scanPort(ip, port))
+            );
+
+            const openPorts = portResults.filter(result => result.status);
+            return {
+                ip,
+                openPorts,
+                timestamp: new Date()
+            };
+        } catch (error) {
+            console.error(`Erreur lors du scan de ${ip}:`, error);
+            return {
+                ip,
+                openPorts: [],
+                error: error.message,
+                timestamp: new Date()
+            };
+        }
+    }
+
     async checkDevice(ip) {
         try {
             // Ping de l'équipement
@@ -109,6 +184,12 @@ class NetworkMonitor extends EventEmitter {
             device.lastSeen = new Date();
             device.latency = pingResult.time;
 
+            // Scan des ports si l'appareil est en ligne
+            if (newStatus === 'online') {
+                const scanResult = await this.scanDevice(ip);
+                device.openPorts = scanResult.openPorts;
+            }
+
             // Résolution du nom d'hôte
             if (newStatus === 'online' && !device.hostname) {
                 try {
@@ -120,7 +201,7 @@ class NetworkMonitor extends EventEmitter {
             }
 
             // Sauvegarde dans la base de données
-            await db.updateDevice(ip, device.hostname, newStatus);
+            await db.updateDevice(ip, device.hostname, newStatus, device.openPorts);
             if (pingResult.alive) {
                 await db.addMetric(device.id, pingResult.time);
             }
@@ -129,7 +210,8 @@ class NetworkMonitor extends EventEmitter {
             this.emit('metrics-update', {
                 deviceId: device.id,
                 timestamp: new Date(),
-                latency: pingResult.time
+                latency: pingResult.time,
+                openPorts: device.openPorts
             });
 
             // Gestion des alertes

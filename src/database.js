@@ -39,13 +39,12 @@ class Database {
         await this.db.run(`
             CREATE TABLE IF NOT EXISTS devices (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ip TEXT NOT NULL,
+                ip TEXT UNIQUE,
                 mac TEXT,
                 hostname TEXT,
-                vendor TEXT,
                 status TEXT,
                 last_seen DATETIME,
-                latency REAL DEFAULT 0,
+                open_ports TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         `);
@@ -113,19 +112,16 @@ class Database {
     }
 
     // Méthodes pour les équipements
-    async updateDevice(ip, hostname, status) {
+    async updateDevice(ip, hostname, status, openPorts = []) {
         return new Promise((resolve, reject) => {
+            const openPortsJson = JSON.stringify(openPorts);
             this.db.run(
-                `INSERT INTO devices (ip, hostname, status, last_seen)
-                 VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-                 ON CONFLICT(ip) DO UPDATE SET
-                 hostname = excluded.hostname,
-                 status = excluded.status,
-                 last_seen = CURRENT_TIMESTAMP`,
-                [ip, hostname, status],
-                function (err) {
+                `INSERT OR REPLACE INTO devices (ip, hostname, status, last_seen, open_ports)
+                 VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?)`,
+                [ip, hostname, status, openPortsJson],
+                (err) => {
                     if (err) reject(err);
-                    else resolve(this.lastID);
+                    else resolve();
                 }
             );
         });

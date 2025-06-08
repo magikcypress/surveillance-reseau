@@ -6,7 +6,9 @@
     "scripts": {
         "start": "node src/index.js",
         "dev": "nodemon src/index.js",
-        "test": "jest"
+        "test": "jest",
+        "test:watch": "jest --watch",
+        "test:coverage": "jest --coverage"
     },
     "dependencies": {
         "bcrypt": "^6.0.0",
@@ -27,5 +29,20 @@
     "devDependencies": {
         "jest": "^29.7.0",
         "nodemon": "^3.0.2"
+    },
+    "jest": {
+        "testEnvironment": "node",
+        "coverageDirectory": "coverage",
+        "collectCoverageFrom": [
+            "src/**/*.js",
+            "!src/**/*.test.js",
+            "!src/public/**"
+        ],
+        "testMatch": [
+            "**/__tests__/**/*.test.js"
+        ],
+        "setupFiles": [
+            "<rootDir>/src/__tests__/setup.js"
+        ]
     }
 }
