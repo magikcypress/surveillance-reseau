@@ -1,0 +1,31 @@
+{
+    "name": "surveillance-reseau",
+    "version": "1.0.0",
+    "description": "Application de surveillance réseau",
+    "main": "src/index.js",
+    "scripts": {
+        "start": "node src/index.js",
+        "dev": "nodemon src/index.js",
+        "test": "jest"
+    },
+    "dependencies": {
+        "bcrypt": "^6.0.0",
+        "bcryptjs": "^2.4.3",
+        "chart.js": "^4.4.1",
+        "connect-sqlite3": "^0.9.13",
+        "dotenv": "^16.3.1",
+        "express": "^4.18.2",
+        "express-session": "^1.17.3",
+        "jsonwebtoken": "^9.0.2",
+        "moment": "^2.29.4",
+        "node-nmap": "^4.0.0",
+        "nodemailer": "^6.9.7",
+        "ping": "^0.4.4",
+        "socket.io": "^4.7.2",
+        "sqlite3": "^5.1.6"
+    },
+    "devDependencies": {
+        "jest": "^29.7.0",
+        "nodemon": "^3.0.2"
+    }
+}
