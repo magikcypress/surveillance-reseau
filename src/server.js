@@ -5,7 +5,8 @@ const cors = require('cors');
 const session = require('express-session');
 const path = require('path');
 const auth = require('./auth');
-const db = require('./database');
+const SQLiteStore = require('connect-sqlite3')(session);
+const Database = require('./database');
 const NetworkMonitor = require('./network-monitor');
 const SpeedTest = require('./speed-test');
 const Notifier = require('./notifier');
@@ -13,6 +14,7 @@ const Notifier = require('./notifier');
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server);
+const db = new Database();
 
 // Configuration de la session
 app.use(session({
@@ -22,7 +24,10 @@ app.use(session({
     cookie: {
         secure: process.env.NODE_ENV === 'production',
         maxAge: 24 * 60 * 60 * 1000 // 24 heures
-    }
+    },
+    store: new SQLiteStore({
+        db: 'sessions.sqlite'
+    })
 }));
 
 // Middleware

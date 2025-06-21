@@ -1,11 +1,12 @@
 // Variables globales
-let socket = null;
-let latencyChart = null;
 let currentUser = null;
+let socket = null;
+let socketInitialized = false;
+let latencyChart = null;
 
 // Fonction pour vérifier si l'utilisateur est authentifié
 function isAuthenticated() {
-    return localStorage.getItem('token') !== null;
+    return localStorage.getItem('accessToken') !== null;
 }
 
 // Fonction pour rediriger vers la page de connexion si non authentifié
@@ -15,26 +16,18 @@ function checkAuth() {
     }
 }
 
-// Fonction pour vérifier si le socket est initialisé
+// Fonction pour vérifier si Socket.IO est initialisé
 function isSocketInitialized() {
-    if (!socket) {
-        console.log('Socket not initialized, attempting to initialize...');
-        initializeSocket();
-        return false;
-    }
-    return socket.connected;
+    return socketInitialized && socket && socket.connected;
 }
 
-// Fonction pour réinitialiser le socket si nécessaire
+// Fonction pour réinitialiser Socket.IO
 function resetSocket() {
     if (socket) {
-        try {
-            socket.disconnect();
-        } catch (error) {
-            console.error('Error disconnecting socket:', error);
-        }
+        socket.disconnect();
         socket = null;
     }
+    socketInitialized = false;
 }
 
 // Initialisation
@@ -52,7 +45,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     checkAuth();
-    startSessionCheck();
 });
 
 // Configuration des événements
@@ -101,62 +93,79 @@ function setupEventListeners() {
     }
 }
 
-// Gestion de l'authentification
+// Fonction pour vérifier l'authentification
 async function checkAuth() {
     try {
-        const token = localStorage.getItem('token');
-        if (!token) {
+        const accessToken = localStorage.getItem('accessToken');
+        if (!accessToken) {
             showPage('login');
             return;
         }
 
-        // Vérifier d'abord la session
-        const sessionResponse = await fetch('/api/auth/check', {
-            method: 'GET',
-            credentials: 'include'
-        });
-
-        if (!sessionResponse.ok) {
-            handleSessionExpired();
-            return;
-        }
-
-        // Vérifier ensuite le token
+        // Vérifier le token
         const response = await fetch('/api/auth/verify', {
             method: 'GET',
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${token}`
-            },
-            credentials: 'include'
+                'Authorization': `Bearer ${accessToken}`
+            }
         });
 
         if (!response.ok) {
-            handleSessionExpired();
-            return;
-        }
-
-        const data = await response.json();
-        currentUser = data;
-
-        // Vérifier si la session expire bientôt
-        if (data.sessionExpires) {
-            const expiresAt = new Date(data.sessionExpires);
-            const now = new Date();
-            const timeUntilExpiry = expiresAt - now;
-
-            // Si la session expire dans moins de 5 minutes
-            if (timeUntilExpiry < 5 * 60 * 1000) {
-                showToast('Attention', 'Votre session expire bientôt', 'warning');
+            // Essayer de rafraîchir le token
+            const refreshResult = await refreshAccessToken();
+            if (!refreshResult) {
+                handleSessionExpired();
+                return;
             }
         }
 
-        showPage('dashboard');
-        initializeSocket();
-        startLatencyMonitoring();
+        const data = await response.json();
+        if (data.success) {
+            currentUser = data.data.user;
+            showPage('dashboard');
+            initializeSocket();
+        } else {
+            handleSessionExpired();
+        }
     } catch (error) {
         console.error('Erreur de vérification d\'authentification:', error);
         handleSessionExpired();
+    }
+}
+
+// Fonction pour rafraîchir le token d'accès
+async function refreshAccessToken() {
+    try {
+        const refreshToken = localStorage.getItem('refreshToken');
+        if (!refreshToken) {
+            return false;
+        }
+
+        const response = await fetch('/api/auth/refresh', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ refreshToken })
+        });
+
+        if (!response.ok) {
+            return false;
+        }
+
+        const data = await response.json();
+        if (data.success) {
+            localStorage.setItem('accessToken', data.data.accessToken);
+            localStorage.setItem('refreshToken', data.data.refreshToken);
+            localStorage.setItem('user', JSON.stringify(data.data.user));
+            return true;
+        }
+
+        return false;
+    } catch (error) {
+        console.error('Erreur lors du rafraîchissement du token:', error);
+        return false;
     }
 }
 
@@ -174,20 +183,32 @@ async function login(username, password) {
         const data = await response.json();
 
         if (!response.ok) {
-            throw new Error(data.error || 'Login failed');
+            throw new Error(data.message || 'Erreur de connexion');
         }
 
-        // Stocker le token dans le localStorage
-        localStorage.setItem('token', data.token);
+        if (!data.success) {
+            throw new Error(data.message || 'Erreur de connexion');
+        }
+
+        // Stocker les tokens dans le localStorage
+        localStorage.setItem('accessToken', data.data.accessToken);
+        localStorage.setItem('refreshToken', data.data.refreshToken);
 
         // Stocker les informations de l'utilisateur
-        localStorage.setItem('user', JSON.stringify(data.user));
+        localStorage.setItem('user', JSON.stringify(data.data.user));
+        currentUser = data.data.user;
 
         // Initialiser la connexion socket
         initializeSocket();
 
-        // Rediriger vers la page principale
-        window.location.href = '/dashboard.html';
+        // Vérifier le rôle et afficher les éléments appropriés
+        checkUserRole();
+
+        // Afficher la page dashboard directement
+        showPage('dashboard');
+
+        // Afficher un message de succès
+        showToast('Succès', 'Connexion réussie', 'success');
     } catch (error) {
         console.error('Login error:', error);
         showError('Erreur de connexion: ' + error.message);
@@ -221,10 +242,10 @@ function showError(message) {
 }
 
 // Fonction d'inscription
-async function register(username, password) {
+async function register(username, password, confirmPassword) {
     try {
         // Validation des données
-        if (!username || !password) {
+        if (!username || !password || !confirmPassword) {
             throw new Error('Veuillez remplir tous les champs');
         }
 
@@ -236,6 +257,10 @@ async function register(username, password) {
             throw new Error('Le mot de passe doit contenir au moins 8 caractères');
         }
 
+        if (password !== confirmPassword) {
+            throw new Error('Les mots de passe ne correspondent pas');
+        }
+
         const response = await fetch('/api/auth/register', {
             method: 'POST',
             headers: {
@@ -244,27 +269,37 @@ async function register(username, password) {
             },
             body: JSON.stringify({
                 username: username.trim(),
-                password: password
+                password: password,
+                confirmPassword: confirmPassword
             })
         });
 
         const data = await response.json();
 
         if (!response.ok) {
-            throw new Error(data.error || data.message || 'Erreur lors de l\'inscription');
+            throw new Error(data.message || 'Erreur lors de l\'inscription');
         }
 
-        // Stocker le token dans le localStorage
-        localStorage.setItem('token', data.token);
+        if (!data.success) {
+            throw new Error(data.message || 'Erreur lors de l\'inscription');
+        }
+
+        // Stocker les tokens dans le localStorage
+        localStorage.setItem('accessToken', data.data.accessToken);
+        localStorage.setItem('refreshToken', data.data.refreshToken);
 
         // Stocker les informations de l'utilisateur
-        localStorage.setItem('user', JSON.stringify(data.user));
+        localStorage.setItem('user', JSON.stringify(data.data.user));
+        currentUser = data.data.user;
 
         // Initialiser la connexion socket
         initializeSocket();
 
-        // Rediriger vers la page principale
-        window.location.href = '/dashboard.html';
+        // Afficher la page dashboard directement
+        showPage('dashboard');
+
+        // Afficher un message de succès
+        showToast('Succès', 'Inscription réussie', 'success');
     } catch (error) {
         console.error('Registration error:', error);
         showError(error.message || 'Erreur lors de l\'inscription');
@@ -307,15 +342,30 @@ function handleRegisterSubmit(event) {
         return;
     }
 
-    register(cleanUsername, password);
+    register(cleanUsername, password, confirmPassword);
 }
 
 // Fonction de déconnexion
-function logout() {
-    resetSocket();
-    localStorage.removeItem('token');
-    localStorage.removeItem('user');
-    window.location.href = '/index.html';
+async function logout() {
+    try {
+        await apiRequest('/api/auth/logout', {
+            method: 'POST'
+        });
+
+        if (socket) {
+            socket.disconnect();
+        }
+
+        localStorage.removeItem('accessToken');
+        localStorage.removeItem('refreshToken');
+        localStorage.removeItem('user');
+        currentUser = null;
+        showPage('login');
+        showToast('Succès', 'Déconnexion réussie', 'success');
+    } catch (error) {
+        console.error('Erreur lors de la déconnexion:', error);
+        showToast('Erreur', 'Impossible de se déconnecter', 'danger');
+    }
 }
 
 // Navigation
@@ -365,6 +415,9 @@ function showPage(pageId) {
                 break;
             case 'alerts':
                 loadAlerts();
+                break;
+            case 'admin':
+                loadUsers();
                 break;
             case 'reports':
                 // Réinitialiser le formulaire de rapport
@@ -570,52 +623,6 @@ function updateLatencyChart(data) {
     latencyChart.update();
 }
 
-// Monitoring de la latence
-function startLatencyMonitoring() {
-    // Vérifier si l'utilisateur est connecté
-    if (!currentUser) {
-        console.log('Utilisateur non connecté, arrêt du monitoring');
-        return;
-    }
-
-    setInterval(async () => {
-        try {
-            // Vérifier si l'utilisateur est toujours connecté
-            if (!currentUser) {
-                console.log('Utilisateur déconnecté, arrêt du monitoring');
-                return;
-            }
-
-            const response = await fetch('/api/metrics/latency', {
-                method: 'GET',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                credentials: 'include'
-            });
-
-            if (response.status === 401) {
-                console.log('Session expirée, arrêt du monitoring');
-                currentUser = null;
-                showPage('login');
-                return;
-            }
-
-            if (!response.ok) {
-                throw new Error('Erreur lors de la récupération de la latence');
-            }
-
-            const data = await response.json();
-            updateLatencyChart(data);
-        } catch (error) {
-            console.error('Erreur lors de la récupération de la latence:', error);
-        }
-    }, 60000); // Mise à jour toutes les minutes
-
-    // Mise à jour immédiate
-    loadDashboardData();
-}
-
 // Test de vitesse
 async function startSpeedTest() {
     const button = document.getElementById('startSpeedTest');
@@ -658,24 +665,100 @@ async function startSpeedTest() {
 // Gestion des alertes
 async function loadAlerts() {
     try {
-        const alerts = await apiRequest('/api/alerts');
-        const alertsList = document.getElementById('alertsList');
-        if (!alertsList) return;
+        const response = await apiRequest('/api/alerts');
+        const data = await response.json();
 
-        alertsList.innerHTML = '';
-        alerts.forEach(alert => {
-            const alertElement = document.createElement('div');
-            alertElement.className = 'alert alert-warning alert-dismissible fade show';
-            alertElement.innerHTML = `
-                <strong>${alert.type}</strong> - ${alert.message}
-                <small class="text-muted d-block">${new Date(alert.timestamp).toLocaleString()}</small>
-                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-            `;
-            alertsList.appendChild(alertElement);
-        });
+        if (data.alerts && data.alerts.length > 0) {
+            const alertsList = document.getElementById('alertsList');
+            alertsList.innerHTML = data.alerts.map(alert => `
+                <div class="alert alert-${alert.resolved ? 'success' : 'warning'} d-flex justify-content-between align-items-center">
+                    <div>
+                        <strong>${alert.type}</strong>: ${alert.message}
+                        <br><small>${new Date(alert.timestamp).toLocaleString()}</small>
+                    </div>
+                    ${!alert.resolved ? `
+                        <button class="btn btn-sm btn-success" onclick="resolveAlert(${alert.id})">
+                            Résoudre
+                        </button>
+                    ` : ''}
+                </div>
+            `).join('');
+        } else {
+            document.getElementById('alertsList').innerHTML = '<p class="text-muted">Aucune alerte pour le moment.</p>';
+        }
     } catch (error) {
         console.error('Erreur lors du chargement des alertes:', error);
         showToast('Erreur', 'Impossible de charger les alertes', 'danger');
+    }
+}
+
+// Gestion des utilisateurs (administration)
+async function loadUsers() {
+    try {
+        const response = await apiRequest('/api/auth/users');
+        const data = await response.json();
+
+        if (data.success && data.data.users) {
+            updateUsersList(data.data.users);
+        } else {
+            showToast('Erreur', data.message || 'Impossible de charger les utilisateurs', 'danger');
+        }
+    } catch (error) {
+        console.error('Erreur lors du chargement des utilisateurs:', error);
+        showToast('Erreur', 'Impossible de charger les utilisateurs', 'danger');
+    }
+}
+
+function updateUsersList(users) {
+    const usersList = document.getElementById('usersList');
+    if (!usersList) return;
+
+    usersList.innerHTML = users.map(user => `
+        <tr>
+            <td>${user.id}</td>
+            <td>${user.username}</td>
+            <td>${user.email}</td>
+            <td>
+                <span class="badge bg-${user.role === 'admin' ? 'danger' : 'primary'}">${user.role}</span>
+            </td>
+            <td>${user.last_login ? new Date(user.last_login).toLocaleString() : 'Jamais'}</td>
+            <td>
+                <span class="badge bg-${user.is_active ? 'success' : 'secondary'}">
+                    ${user.is_active ? 'Actif' : 'Inactif'}
+                </span>
+            </td>
+            <td>
+                ${user.id !== currentUser.id ? `
+                    <button class="btn btn-sm btn-danger" onclick="deleteUser(${user.id}, '${user.username}')">
+                        <i class="bi bi-trash"></i> Supprimer
+                    </button>
+                ` : '<span class="text-muted">Vous</span>'}
+            </td>
+        </tr>
+    `).join('');
+}
+
+async function deleteUser(userId, username) {
+    if (!confirm(`Êtes-vous sûr de vouloir supprimer l'utilisateur "${username}" ? Cette action est irréversible.`)) {
+        return;
+    }
+
+    try {
+        const response = await apiRequest(`/api/auth/users/${userId}`, {
+            method: 'DELETE'
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+            showToast('Succès', 'Utilisateur supprimé avec succès', 'success');
+            loadUsers(); // Recharger la liste
+        } else {
+            showToast('Erreur', data.message || 'Erreur lors de la suppression', 'danger');
+        }
+    } catch (error) {
+        console.error('Erreur lors de la suppression de l\'utilisateur:', error);
+        showToast('Erreur', 'Impossible de supprimer l\'utilisateur', 'danger');
     }
 }
 
@@ -739,33 +822,40 @@ function showToast(title, message, type = 'info') {
     });
 }
 
-// Initialisation de Socket.IO
+// Fonction pour initialiser Socket.IO
 function initializeSocket() {
-    if (!isAuthenticated()) {
-        console.log('Not authenticated, skipping socket initialization');
-        return;
-    }
-
     try {
-        resetSocket();
+        // Vérifier si l'utilisateur est authentifié
+        const accessToken = localStorage.getItem('accessToken');
+        if (!accessToken) {
+            console.log('Utilisateur non authentifié, Socket.IO non initialisé');
+            return;
+        }
 
-        console.log('Initializing new socket connection');
+        // Vérifier si Socket.IO est déjà initialisé
+        if (socket && socket.connected) {
+            console.log('Socket.IO déjà connecté');
+            return;
+        }
+
+        console.log('Initialisation de Socket.IO...');
+
+        // Initialiser Socket.IO avec le token d'authentification
         socket = io({
             auth: {
-                token: localStorage.getItem('token')
-            },
-            reconnection: true,
-            reconnectionAttempts: 5,
-            reconnectionDelay: 1000
+                token: accessToken
+            }
         });
 
         socket.on('connect', () => {
             console.log('Connected to server');
+            socketInitialized = true;
         });
 
         socket.on('disconnect', () => {
             console.log('Disconnected from server');
             socket = null;
+            socketInitialized = false;
         });
 
         socket.on('error', (error) => {
@@ -789,9 +879,10 @@ function initializeSocket() {
         socket.on('connect_error', (error) => {
             console.error('Socket connection error:', error);
             if (error.message === 'Authentication failed') {
-                localStorage.removeItem('token');
+                localStorage.removeItem('accessToken');
+                localStorage.removeItem('refreshToken');
                 localStorage.removeItem('user');
-                window.location.href = '/index.html';
+                handleSessionExpired();
             }
             resetSocket();
         });
@@ -846,7 +937,9 @@ function handleSessionExpired() {
         socket.disconnect();
     }
 
-    localStorage.removeItem('token');
+    localStorage.removeItem('accessToken');
+    localStorage.removeItem('refreshToken');
+    localStorage.removeItem('user');
     currentUser = null;
 
     const toast = document.getElementById('sessionExpiredToast');
@@ -858,86 +951,78 @@ function handleSessionExpired() {
     showPage('login');
 }
 
-// Écouter les événements de session expirée du serveur
-socket.on('session:expired', () => {
-    handleSessionExpired();
-});
-
-// Vérification périodique de la session
-function startSessionCheck() {
-    setInterval(async () => {
-        if (currentUser) {
-            try {
-                const response = await fetch('/api/auth/check', {
-                    method: 'GET',
-                    credentials: 'include'
-                });
-
-                if (!response.ok) {
-                    handleSessionExpired();
-                }
-            } catch (error) {
-                console.error('Erreur de vérification de session:', error);
-                handleSessionExpired();
-            }
-        }
-    }, 60000); // Vérifier toutes les minutes
-}
-
 // Fonction utilitaire pour les requêtes API
 async function apiRequest(url, options = {}) {
-    const token = localStorage.getItem('token');
-    if (!token) {
-        handleSessionExpired();
-        throw new Error('Non authentifié');
+    try {
+        const accessToken = localStorage.getItem('accessToken');
+
+        const defaultOptions = {
+            headers: {
+                'Content-Type': 'application/json',
+                ...(accessToken && { 'Authorization': `Bearer ${accessToken}` }),
+                ...options.headers
+            }
+        };
+
+        const response = await fetch(url, { ...defaultOptions, ...options });
+
+        // Si le token a expiré, essayer de le rafraîchir
+        if (response.status === 401) {
+            const refreshResult = await refreshAccessToken();
+            if (refreshResult) {
+                // Réessayer la requête avec le nouveau token
+                const newAccessToken = localStorage.getItem('accessToken');
+                const newOptions = {
+                    ...options,
+                    headers: {
+                        ...options.headers,
+                        'Authorization': `Bearer ${newAccessToken}`
+                    }
+                };
+                return await fetch(url, { ...defaultOptions, ...newOptions });
+            } else {
+                handleSessionExpired();
+                throw new Error('Session expirée');
+            }
+        }
+
+        return response;
+    } catch (error) {
+        console.error('Erreur lors de la requête API:', error);
+        throw error;
     }
-
-    const defaultOptions = {
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-        },
-        credentials: 'include'
-    };
-
-    const response = await fetch(url, { ...defaultOptions, ...options });
-
-    if (response.status === 401) {
-        handleSessionExpired();
-        throw new Error('Session expirée');
-    }
-
-    if (!response.ok) {
-        throw new Error(`Erreur API: ${response.statusText}`);
-    }
-
-    return response.json();
 }
 
 // Initialisation de l'application
 async function initializeApp() {
     try {
-        // Vérifier l'authentification
-        const token = localStorage.getItem('token');
-        if (token) {
-            const response = await apiRequest('/api/auth/verify', {
-                method: 'GET'
-            });
-            if (response.valid) {
-                currentUser = response.user;
-                showPage('dashboard');
-            } else {
-                handleSessionExpired();
+        // Configurer les événements en premier
+        setupEventListeners();
+
+        // Récupérer l'utilisateur depuis le localStorage s'il existe
+        const userStr = localStorage.getItem('user');
+        if (userStr) {
+            try {
+                currentUser = JSON.parse(userStr);
+            } catch (error) {
+                console.error('Erreur lors du parsing de l\'utilisateur:', error);
+                localStorage.removeItem('user');
             }
-        } else {
-            showPage('login');
         }
 
-        // Initialiser Socket.IO
-        initializeSocket();
-
-        // Configurer les événements
-        setupEventListeners();
+        // Vérifier l'authentification seulement si pas déjà connecté
+        if (!currentUser) {
+            const accessToken = localStorage.getItem('accessToken');
+            if (accessToken) {
+                await checkAuth();
+            } else {
+                showPage('login');
+            }
+        } else {
+            // Si l'utilisateur est déjà connecté, afficher le dashboard
+            showPage('dashboard');
+            initializeSocket();
+        }
 
     } catch (error) {
         console.error('Erreur lors de l\'initialisation:', error);
@@ -967,7 +1052,9 @@ async function handleLogout() {
             socket.disconnect();
         }
 
-        localStorage.removeItem('token');
+        localStorage.removeItem('accessToken');
+        localStorage.removeItem('refreshToken');
+        localStorage.removeItem('user');
         currentUser = null;
         showPage('login');
         showToast('Succès', 'Déconnexion réussie', 'success');
@@ -978,4 +1065,14 @@ async function handleLogout() {
 }
 
 // Démarrer l'application
-document.addEventListener('DOMContentLoaded', initializeApp); 
+document.addEventListener('DOMContentLoaded', initializeApp);
+
+function checkUserRole() {
+    if (currentUser && currentUser.role === 'admin') {
+        // Afficher les éléments d'administration
+        const adminNavItem = document.getElementById('adminNavItem');
+        if (adminNavItem) {
+            adminNavItem.style.display = 'block';
+        }
+    }
+} 

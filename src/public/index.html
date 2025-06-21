@@ -310,6 +310,9 @@
                         <li class="nav-item">
                             <a class="nav-link" href="#reports">Rapports</a>
                         </li>
+                        <li class="nav-item" id="adminNavItem" style="display: none;">
+                            <a class="nav-link" href="#admin">Administration</a>
+                        </li>
                     </ul>
                     <ul class="navbar-nav ms-auto">
                         <li class="nav-item">
@@ -458,6 +461,33 @@
                         </form>
                         <div id="reportContent">
                             <!-- Le contenu du rapport sera ajouté ici -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Page Administration -->
+            <div id="admin" class="page d-none">
+                <div class="card mb-4">
+                    <div class="card-body">
+                        <h5 class="card-title">Gestion des utilisateurs</h5>
+                        <div class="table-responsive">
+                            <table class="table table-hover">
+                                <thead>
+                                    <tr>
+                                        <th>ID</th>
+                                        <th>Nom d'utilisateur</th>
+                                        <th>Email</th>
+                                        <th>Rôle</th>
+                                        <th>Dernière connexion</th>
+                                        <th>Statut</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="usersList">
+                                    <!-- Les utilisateurs seront ajoutés ici dynamiquement -->
+                                </tbody>
+                            </table>
                         </div>
                     </div>
                 </div>

@@ -1,9 +1,9 @@
 const EventEmitter = require('events');
 const ping = require('ping');
 const dns = require('dns').promises;
-const db = require('./database');
+const Database = require('./database');
 const config = require('./config');
-const notifier = require('./notifier');
+const Notifier = require('./notifier');
 const net = require('net');
 
 class NetworkMonitor extends EventEmitter {
@@ -16,6 +16,9 @@ class NetworkMonitor extends EventEmitter {
         this.pingInterval = 5000; // 5 secondes
         this.timeout = 2000; // 2 secondes
         this.commonPorts = [21, 22, 23, 25, 53, 80, 110, 143, 443, 3306, 3389, 8080];
+        this.db = new Database();
+        this.notifier = new Notifier();
+        this.isScanning = false;
         this.initializeDevices();
     }
 
@@ -205,9 +208,9 @@ class NetworkMonitor extends EventEmitter {
             }
 
             // Sauvegarde dans la base de données
-            await db.updateDevice(ip, device.hostname, newStatus, device.openPorts);
+            await this.db.updateDevice(ip, device.hostname, newStatus, device.openPorts);
             if (pingResult.alive) {
-                await db.addMetric(device.id, pingResult.time);
+                await this.db.addMetric(device.id, pingResult.time);
             }
 
             // Émission des métriques
@@ -231,7 +234,7 @@ class NetworkMonitor extends EventEmitter {
             if (device) {
                 device.status = 'error';
                 device.lastSeen = new Date();
-                await db.updateDevice(ip, device.hostname, 'error');
+                await this.db.updateDevice(ip, device.hostname, 'error');
             }
         }
     }
@@ -243,7 +246,7 @@ class NetworkMonitor extends EventEmitter {
             deviceId: device.id
         };
 
-        await db.addAlert(device.id, alert.type, alert.message);
+        await this.db.addAlert(device.id, alert.type, alert.message);
         this.emit('alert', alert);
     }
 
@@ -254,7 +257,7 @@ class NetworkMonitor extends EventEmitter {
             deviceId: device.id
         };
 
-        await db.addAlert(device.id, alert.type, alert.message);
+        await this.db.addAlert(device.id, alert.type, alert.message);
         this.emit('alert', alert);
     }
 

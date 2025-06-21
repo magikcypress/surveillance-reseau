@@ -1,195 +1,386 @@
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
-const db = require('./database');
+const Database = require('./database');
+const ErrorHandler = require('./utils/errorHandler');
 
 class Auth {
     constructor() {
+        this.db = new Database();
         this.jwtSecret = process.env.JWT_SECRET || 'your-secret-key';
-        if (!this.jwtSecret) {
-            console.warn('Warning: JWT_SECRET is not set. Using default secret key.');
+        this.tokenExpiry = process.env.JWT_EXPIRY || '24h';
+        this.refreshTokenExpiry = process.env.REFRESH_TOKEN_EXPIRY || '7d';
+
+        if (!process.env.JWT_SECRET) {
+            console.warn('⚠️  JWT_SECRET is not set. Using default secret key.');
         }
+
         // Lier les méthodes à l'instance
         this.authenticate = this.authenticate.bind(this);
         this.verifyToken = this.verifyToken.bind(this);
     }
 
+    /**
+     * Enregistrer un nouvel utilisateur
+     * @param {Object} userData - Données de l'utilisateur
+     * @returns {Object} Utilisateur créé avec token
+     */
     async register(userData) {
         try {
             // Vérifier si l'utilisateur existe déjà
-            const existingUser = await db.getUserByUsername(userData.username);
+            const existingUser = await this.db.getUserByUsername(userData.username);
             if (existingUser) {
-                throw new Error('Username already exists');
+                throw ErrorHandler.createError('Un utilisateur avec ce nom existe déjà', 409, 'USERNAME_EXISTS');
+            }
+
+            // Vérifier si l'email existe déjà (si fourni)
+            if (userData.email) {
+                const existingEmail = await this.db.getUserByEmail(userData.email);
+                if (existingEmail) {
+                    throw ErrorHandler.createError('Un utilisateur avec cet email existe déjà', 409, 'EMAIL_EXISTS');
+                }
             }
 
             // Hasher le mot de passe
-            const hashedPassword = await bcrypt.hash(userData.password, 10);
+            const saltRounds = 12;
+            const hashedPassword = await bcrypt.hash(userData.password, saltRounds);
 
             // Créer l'utilisateur
-            const user = await db.createUser({
-                username: userData.username,
-                password: hashedPassword,
-                role: userData.role || 'user'
-            });
+            const email = userData.email || `${userData.username}@example.com`;
+            const userId = await this.db.createUser(userData.username, hashedPassword, email);
 
-            // Générer le token
-            const token = this.generateToken(user);
+            // Récupérer l'utilisateur créé
+            const user = await this.db.getUserByUsername(userData.username);
+
+            // Générer les tokens
+            const { accessToken, refreshToken } = this.generateTokens(user);
 
             return {
-                user: {
-                    id: user.id,
-                    username: user.username,
-                    role: user.role
-                },
-                token
+                success: true,
+                message: 'Inscription réussie',
+                data: {
+                    user: this.sanitizeUser(user),
+                    accessToken,
+                    refreshToken
+                }
             };
         } catch (error) {
-            console.error('Registration error:', error);
-            throw new Error('Registration failed: ' + error.message);
+            throw error;
         }
     }
 
+    /**
+     * Connecter un utilisateur
+     * @param {Object} credentials - Identifiants de connexion
+     * @returns {Object} Utilisateur connecté avec token
+     */
     async login(credentials) {
         try {
             // Vérifier les identifiants
-            const user = await db.getUserByUsername(credentials.username);
+            const user = await this.db.getUserByUsername(credentials.username);
             if (!user) {
-                throw new Error('Invalid credentials');
+                throw ErrorHandler.createError('Nom d\'utilisateur ou mot de passe incorrect', 401, 'INVALID_CREDENTIALS');
             }
 
             // Vérifier le mot de passe
             const isValid = await bcrypt.compare(credentials.password, user.password);
             if (!isValid) {
-                throw new Error('Invalid credentials');
+                throw ErrorHandler.createError('Nom d\'utilisateur ou mot de passe incorrect', 401, 'INVALID_CREDENTIALS');
             }
 
-            // Générer le token
-            const token = this.generateToken(user);
+            // Mettre à jour la dernière connexion
+            await this.db.updateLastLogin(user.id);
+
+            // Générer les tokens
+            const { accessToken, refreshToken } = this.generateTokens(user);
 
             return {
-                user: {
-                    id: user.id,
-                    username: user.username,
-                    role: user.role
-                },
-                token
+                success: true,
+                message: 'Connexion réussie',
+                data: {
+                    user: this.sanitizeUser(user),
+                    accessToken,
+                    refreshToken
+                }
             };
         } catch (error) {
-            console.error('Login error:', error);
-            throw new Error('Login failed: ' + error.message);
+            throw error;
         }
     }
 
-    generateToken(user) {
-        return jwt.sign(
-            {
-                id: user.id,
-                username: user.username,
-                role: user.role
-            },
-            this.jwtSecret,
-            { expiresIn: '24h' }
-        );
-    }
-
-    async verifyToken(token) {
+    /**
+     * Déconnecter un utilisateur
+     * @param {string} userId - ID de l'utilisateur
+     * @returns {Object} Résultat de la déconnexion
+     */
+    async logout(userId) {
         try {
-            const decoded = jwt.verify(token, this.jwtSecret);
-            const user = await db.getUserById(decoded.id);
-
-            if (!user) {
-                throw new Error('User not found');
-            }
+            // Dans une implémentation plus avancée, on pourrait invalider le refresh token
+            // ou l'ajouter à une liste noire
+            await this.db.updateLastLogout(userId);
 
             return {
-                id: user.id,
-                username: user.username,
-                role: user.role
+                success: true,
+                message: 'Déconnexion réussie'
+            };
+        } catch (error) {
+            throw error;
+        }
+    }
+
+    /**
+     * Rafraîchir un token
+     * @param {string} refreshToken - Token de rafraîchissement
+     * @returns {Object} Nouveaux tokens
+     */
+    async refreshToken(refreshToken) {
+        try {
+            const decoded = jwt.verify(refreshToken, this.jwtSecret);
+            const user = await this.db.getUserById(decoded.id);
+
+            if (!user) {
+                throw ErrorHandler.createError('Utilisateur non trouvé', 404, 'USER_NOT_FOUND');
+            }
+
+            const tokens = this.generateTokens(user);
+
+            return {
+                success: true,
+                message: 'Token rafraîchi avec succès',
+                data: {
+                    user: this.sanitizeUser(user),
+                    accessToken: tokens.accessToken,
+                    refreshToken: tokens.refreshToken
+                }
             };
         } catch (error) {
             if (error.name === 'TokenExpiredError') {
-                throw new Error('Token expired');
+                throw ErrorHandler.createError('Token de rafraîchissement expiré', 401, 'REFRESH_TOKEN_EXPIRED');
             }
-            throw new Error('Invalid token');
+            throw error;
         }
     }
 
+    /**
+     * Générer les tokens d'accès et de rafraîchissement
+     * @param {Object} user - Utilisateur
+     * @returns {Object} Tokens générés
+     */
+    generateTokens(user) {
+        const payload = {
+            id: user.id,
+            username: user.username,
+            role: user.role
+        };
+
+        const accessToken = jwt.sign(payload, this.jwtSecret, {
+            expiresIn: this.tokenExpiry
+        });
+
+        const refreshToken = jwt.sign(payload, this.jwtSecret, {
+            expiresIn: this.refreshTokenExpiry
+        });
+
+        return { accessToken, refreshToken };
+    }
+
+    /**
+     * Vérifier un token d'accès
+     * @param {string} token - Token à vérifier
+     * @returns {Object} Données décodées du token
+     */
+    async verifyToken(token) {
+        try {
+            const decoded = jwt.verify(token, this.jwtSecret);
+            const user = await this.db.getUserById(decoded.id);
+
+            if (!user) {
+                throw ErrorHandler.createError('Utilisateur non trouvé', 404, 'USER_NOT_FOUND');
+            }
+
+            return this.sanitizeUser(user);
+        } catch (error) {
+            if (error.name === 'TokenExpiredError') {
+                throw ErrorHandler.createError('Token expiré', 401, 'TOKEN_EXPIRED');
+            }
+            if (error.name === 'JsonWebTokenError') {
+                throw ErrorHandler.createError('Token invalide', 401, 'INVALID_TOKEN');
+            }
+            throw error;
+        }
+    }
+
+    /**
+     * Middleware d'authentification
+     */
     async authenticate(req, res, next) {
         try {
             const authHeader = req.headers.authorization;
             if (!authHeader) {
                 return res.status(401).json({
-                    error: 'No token provided',
-                    code: 'AUTH_NO_TOKEN'
+                    success: false,
+                    message: 'Token d\'accès requis',
+                    code: 'ACCESS_TOKEN_REQUIRED'
                 });
             }
 
-            const token = authHeader.split(' ')[1];
-            if (!token) {
+            const [bearer, token] = authHeader.split(' ');
+            if (bearer !== 'Bearer' || !token) {
                 return res.status(401).json({
-                    error: 'Invalid token format',
-                    code: 'AUTH_INVALID_FORMAT'
+                    success: false,
+                    message: 'Format de token invalide',
+                    code: 'INVALID_TOKEN_FORMAT'
                 });
             }
 
-            try {
-                const user = await this.verifyToken(token);
-                req.user = user;
-                next();
-            } catch (error) {
-                if (error.message === 'Token expired') {
-                    return res.status(401).json({
-                        error: 'Token expired',
-                        code: 'AUTH_TOKEN_EXPIRED'
-                    });
-                }
-                return res.status(401).json({
-                    error: 'Invalid token',
-                    code: 'AUTH_INVALID_TOKEN'
-                });
-            }
+            const user = await this.verifyToken(token);
+            req.user = user;
+            next();
         } catch (error) {
-            console.error('Authentication error:', error);
-            return res.status(500).json({
-                error: 'Authentication failed',
-                code: 'AUTH_SERVER_ERROR'
+            return res.status(401).json({
+                success: false,
+                message: error.message,
+                code: error.code || 'AUTHENTICATION_FAILED'
             });
         }
     }
 
-    async logout(req, res) {
-        try {
-            // Dans une implémentation plus avancée, on pourrait invalider le token
-            // Pour l'instant, on se contente de renvoyer une réponse de succès
-            res.json({ message: 'Logged out successfully' });
-        } catch (error) {
-            console.error('Logout error:', error);
-            res.status(500).json({
-                error: 'Logout failed',
-                code: 'AUTH_LOGOUT_ERROR'
-            });
-        }
-    }
-
-    requireRole(role) {
+    /**
+     * Middleware de vérification de rôle
+     * @param {string|Array} roles - Rôle(s) autorisé(s)
+     */
+    requireRole(roles) {
         return async (req, res, next) => {
             try {
-                console.log('Vérification du rôle...');
-                const user = await db.getUser(req.user.username);
-                if (!user) {
-                    console.log('Utilisateur non trouvé');
-                    return res.status(401).json({ message: 'Utilisateur non trouvé' });
+                const allowedRoles = Array.isArray(roles) ? roles : [roles];
+
+                if (!req.user) {
+                    return res.status(401).json({
+                        success: false,
+                        message: 'Authentification requise',
+                        code: 'AUTHENTICATION_REQUIRED'
+                    });
                 }
-                if (user.role !== role) {
-                    console.log('Rôle insuffisant');
-                    return res.status(403).json({ message: 'Accès refusé' });
+
+                if (!allowedRoles.includes(req.user.role)) {
+                    return res.status(403).json({
+                        success: false,
+                        message: 'Accès refusé - Permissions insuffisantes',
+                        code: 'INSUFFICIENT_PERMISSIONS'
+                    });
                 }
-                console.log('Rôle vérifié avec succès');
+
                 next();
             } catch (error) {
-                console.error('Erreur de vérification du rôle:', error);
-                res.status(500).json({ message: 'Erreur serveur' });
+                return res.status(500).json({
+                    success: false,
+                    message: 'Erreur lors de la vérification des permissions',
+                    code: 'PERMISSION_CHECK_ERROR'
+                });
             }
         };
+    }
+
+    /**
+     * Nettoyer les données utilisateur (supprimer les informations sensibles)
+     * @param {Object} user - Utilisateur
+     * @returns {Object} Utilisateur nettoyé
+     */
+    sanitizeUser(user) {
+        const { password, ...sanitizedUser } = user;
+        return sanitizedUser;
+    }
+
+    /**
+     * Changer le mot de passe d'un utilisateur
+     * @param {number} userId - ID de l'utilisateur
+     * @param {string} currentPassword - Mot de passe actuel
+     * @param {string} newPassword - Nouveau mot de passe
+     */
+    async changePassword(userId, currentPassword, newPassword) {
+        try {
+            const user = await this.db.getUserById(userId);
+            if (!user) {
+                throw ErrorHandler.createError('Utilisateur non trouvé', 404, 'USER_NOT_FOUND');
+            }
+
+            // Vérifier le mot de passe actuel
+            const isValid = await bcrypt.compare(currentPassword, user.password);
+            if (!isValid) {
+                throw ErrorHandler.createError('Mot de passe actuel incorrect', 401, 'INVALID_CURRENT_PASSWORD');
+            }
+
+            // Hasher le nouveau mot de passe
+            const saltRounds = 12;
+            const hashedNewPassword = await bcrypt.hash(newPassword, saltRounds);
+
+            // Mettre à jour le mot de passe
+            await this.db.updatePassword(userId, hashedNewPassword);
+
+            return {
+                success: true,
+                message: 'Mot de passe modifié avec succès'
+            };
+        } catch (error) {
+            throw error;
+        }
+    }
+
+    /**
+     * Supprimer un utilisateur
+     * @param {number} userId - ID de l'utilisateur à supprimer
+     * @param {number} currentUserId - ID de l'utilisateur qui effectue la suppression
+     */
+    async deleteUser(userId, currentUserId) {
+        try {
+            // Vérifier que l'utilisateur existe
+            const user = await this.db.getUserById(userId);
+            if (!user) {
+                throw ErrorHandler.createError('Utilisateur non trouvé', 404, 'USER_NOT_FOUND');
+            }
+
+            // Empêcher la suppression de soi-même
+            if (userId === currentUserId) {
+                throw ErrorHandler.createError('Vous ne pouvez pas supprimer votre propre compte', 400, 'CANNOT_DELETE_SELF');
+            }
+
+            // Empêcher la suppression du dernier administrateur
+            if (user.role === 'admin') {
+                const allUsers = await this.db.getAllUsers();
+                const adminUsers = allUsers.filter(u => u.role === 'admin' && u.is_active);
+                if (adminUsers.length <= 1) {
+                    throw ErrorHandler.createError('Impossible de supprimer le dernier administrateur', 400, 'CANNOT_DELETE_LAST_ADMIN');
+                }
+            }
+
+            // Supprimer l'utilisateur
+            const deleted = await this.db.deleteUser(userId);
+            if (!deleted) {
+                throw ErrorHandler.createError('Erreur lors de la suppression de l\'utilisateur', 500, 'DELETE_FAILED');
+            }
+
+            return {
+                success: true,
+                message: 'Utilisateur supprimé avec succès'
+            };
+        } catch (error) {
+            throw error;
+        }
+    }
+
+    /**
+     * Obtenir tous les utilisateurs (pour l'administration)
+     */
+    async getAllUsers() {
+        try {
+            const users = await this.db.getAllUsers();
+            return {
+                success: true,
+                message: 'Utilisateurs récupérés avec succès',
+                data: { users }
+            };
+        } catch (error) {
+            throw error;
+        }
     }
 }
 

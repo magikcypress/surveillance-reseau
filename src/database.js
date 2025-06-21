@@ -29,7 +29,11 @@ class Database {
                         password TEXT NOT NULL,
                         email TEXT UNIQUE NOT NULL,
                         role TEXT DEFAULT 'user',
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                        last_login DATETIME,
+                        last_logout DATETIME,
+                        is_active BOOLEAN DEFAULT TRUE,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
                     )
                 `);
 
@@ -67,6 +71,29 @@ class Database {
                         upload REAL NOT NULL,
                         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                     )
+                `);
+
+                // Table des alertes
+                this.db.run(`
+                    CREATE TABLE IF NOT EXISTS alerts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        device_id INTEGER,
+                        type TEXT NOT NULL,
+                        message TEXT NOT NULL,
+                        resolved BOOLEAN DEFAULT FALSE,
+                        resolved_at DATETIME,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (device_id) REFERENCES devices (id)
+                    )
+                `);
+
+                // Table de l'historique de latence
+                this.db.run(`
+                    CREATE TABLE IF NOT EXISTS latency_history (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        latency REAL NOT NULL
+                    )
                 `, async (err) => {
                     if (err) {
                         reject(err);
@@ -79,12 +106,7 @@ class Database {
                         if (!adminExists) {
                             // Créer un utilisateur admin par défaut
                             const hashedPassword = await bcrypt.hash('admin', 10);
-                            await this.createUser({
-                                username: 'admin',
-                                password: hashedPassword,
-                                email: 'admin@example.com',
-                                role: 'admin'
-                            });
+                            await this.createUser('admin', hashedPassword, 'admin@example.com');
                         }
                         resolve();
                     } catch (error) {
@@ -131,6 +153,83 @@ class Database {
                 (err, row) => {
                     if (err) reject(err);
                     else resolve(row);
+                }
+            );
+        });
+    }
+
+    async getUserByEmail(email) {
+        return new Promise((resolve, reject) => {
+            this.db.get(
+                'SELECT * FROM users WHERE email = ?',
+                [email],
+                (err, row) => {
+                    if (err) reject(err);
+                    else resolve(row);
+                }
+            );
+        });
+    }
+
+    async updateLastLogin(userId) {
+        return new Promise((resolve, reject) => {
+            this.db.run(
+                'UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?',
+                [userId],
+                function (err) {
+                    if (err) reject(err);
+                    else resolve(this.changes);
+                }
+            );
+        });
+    }
+
+    async updateLastLogout(userId) {
+        return new Promise((resolve, reject) => {
+            this.db.run(
+                'UPDATE users SET last_logout = CURRENT_TIMESTAMP WHERE id = ?',
+                [userId],
+                function (err) {
+                    if (err) reject(err);
+                    else resolve(this.changes);
+                }
+            );
+        });
+    }
+
+    async updatePassword(userId, hashedPassword) {
+        return new Promise((resolve, reject) => {
+            this.db.run(
+                'UPDATE users SET password = ? WHERE id = ?',
+                [hashedPassword, userId],
+                function (err) {
+                    if (err) reject(err);
+                    else resolve(this.changes);
+                }
+            );
+        });
+    }
+
+    async deleteUser(userId) {
+        return new Promise((resolve, reject) => {
+            this.db.run(
+                'DELETE FROM users WHERE id = ?',
+                [userId],
+                function (err) {
+                    if (err) reject(err);
+                    else resolve(this.changes > 0);
+                }
+            );
+        });
+    }
+
+    async getAllUsers() {
+        return new Promise((resolve, reject) => {
+            this.db.all(
+                'SELECT id, username, email, role, last_login, last_logout, is_active, created_at FROM users ORDER BY created_at DESC',
+                (err, rows) => {
+                    if (err) reject(err);
+                    else resolve(rows);
                 }
             );
         });
@@ -369,6 +468,15 @@ class Database {
     async getDeviceByIP(ip) {
         return new Promise((resolve, reject) => {
             this.db.get('SELECT * FROM devices WHERE ip = ?', [ip], (err, row) => {
+                if (err) reject(err);
+                else resolve(row);
+            });
+        });
+    }
+
+    async getDeviceById(id) {
+        return new Promise((resolve, reject) => {
+            this.db.get('SELECT * FROM devices WHERE id = ?', [id], (err, row) => {
                 if (err) reject(err);
                 else resolve(row);
             });

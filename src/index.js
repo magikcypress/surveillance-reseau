@@ -9,7 +9,9 @@ const NetworkMonitor = require('./network-monitor');
 const SpeedTest = require('./speed-test');
 const auth = require('./auth');
 const notifier = require('./notifier');
-const db = require('./database');
+const Database = require('./database');
+const ErrorHandler = require('./utils/errorHandler');
+const authRoutes = require('./routes/authRoutes');
 const { exec } = require('child_process');
 const { promisify } = require('util');
 const execAsync = promisify(exec);
@@ -19,6 +21,7 @@ const server = http.createServer(app);
 const io = socketIo(server);
 const networkMonitor = new NetworkMonitor();
 const speedTest = new SpeedTest();
+const db = new Database();
 
 // Middleware
 app.use(express.json());
@@ -39,106 +42,11 @@ app.use(session({
     }
 }));
 
-// Middleware de gestion des erreurs
-app.use((err, req, res, next) => {
-    console.error('Erreur serveur:', err);
-    res.status(500).json({ message: 'Une erreur est survenue' });
-});
-
 // Routes d'authentification
-app.post('/api/auth/register', async (req, res) => {
-    try {
-        const { username, password, email } = req.body;
-        if (!username || !password || !email) {
-            return res.status(400).json({ message: 'Tous les champs sont requis' });
-        }
-        const result = await auth.register(username, password, email);
-        res.json(result);
-    } catch (error) {
-        res.status(400).json({ message: error.message });
-    }
-});
+app.use('/api/auth', authRoutes);
 
-app.post('/api/auth/login', async (req, res) => {
-    try {
-        const { username, password } = req.body;
-        if (!username || !password) {
-            return res.status(400).json({ message: 'Nom d\'utilisateur et mot de passe requis' });
-        }
-        const result = await auth.login(username, password);
-        res.json(result);
-    } catch (error) {
-        res.status(401).json({ message: error.message });
-    }
-});
-
-app.post('/api/auth/logout', (req, res) => {
-    try {
-        // Détruire la session
-        req.session.destroy((err) => {
-            if (err) {
-                console.error('Erreur lors de la destruction de la session:', err);
-                return res.status(500).json({ message: 'Erreur lors de la déconnexion' });
-            }
-            res.clearCookie('connect.sid');
-            res.json({ message: 'Déconnexion réussie' });
-        });
-    } catch (error) {
-        console.error('Erreur lors de la déconnexion:', error);
-        res.status(500).json({ message: 'Erreur lors de la déconnexion' });
-    }
-});
-
-// Route de vérification du token sans middleware d'authentification
-app.get('/api/auth/verify', async (req, res) => {
-    try {
-        const authHeader = req.headers.authorization;
-        if (!authHeader) {
-            return res.status(401).json({ message: 'Token manquant' });
-        }
-
-        const [bearer, token] = authHeader.split(' ');
-        if (bearer !== 'Bearer' || !token) {
-            return res.status(401).json({ message: 'Format de token invalide' });
-        }
-
-        const decoded = auth.verifyToken(token);
-        const user = await db.getUser(decoded.username);
-        if (!user) {
-            return res.status(401).json({ message: 'Utilisateur non trouvé' });
-        }
-
-        // Vérifier si la session existe
-        const session = await new Promise((resolve, reject) => {
-            req.sessionStore.get(req.sessionID, (err, session) => {
-                if (err) reject(err);
-                resolve(session);
-            });
-        });
-
-        if (!session) {
-            return res.status(401).json({ message: 'Session expirée' });
-        }
-
-        res.json({
-            id: user.id,
-            username: user.username,
-            email: user.email,
-            role: user.role,
-            sessionExpires: session.cookie.expires
-        });
-    } catch (error) {
-        res.status(401).json({ message: error.message });
-    }
-});
-
-// Route de vérification de session
-app.get('/api/auth/check', (req, res) => {
-    if (!req.session || !req.session.userId) {
-        return res.status(401).json({ message: 'Session expirée' });
-    }
-    res.json({ valid: true });
-});
+// Middleware de gestion des erreurs
+app.use(ErrorHandler.handle);
 
 // Routes API
 app.get('/api/network/devices', auth.authenticate, async (req, res) => {

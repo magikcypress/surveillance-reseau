@@ -1,9 +1,10 @@
 const nodemailer = require('nodemailer');
-const db = require('./database');
+const Database = require('./database');
 
 class Notifier {
     constructor() {
         this.transporter = null;
+        this.db = new Database();
         this.initializeTransporter();
     }
 
@@ -39,7 +40,7 @@ class Notifier {
         }
 
         try {
-            const device = await db.getDevice(alert.deviceId);
+            const device = await this.db.getDeviceById(alert.deviceId);
             if (!device) {
                 throw new Error('Équipement non trouvé');
             }
@@ -79,7 +80,7 @@ class Notifier {
             const today = new Date();
             today.setHours(0, 0, 0, 0);
 
-            const report = await db.generateReport(yesterday.toISOString(), today.toISOString());
+            const report = await this.db.generateReport(yesterday.toISOString(), today.toISOString());
 
             const mailOptions = {
                 from: process.env.SMTP_FROM,
@@ -131,7 +132,7 @@ class Notifier {
         }
 
         try {
-            const report = await db.generateReport(startDate, endDate);
+            const report = await this.db.generateReport(startDate, endDate);
 
             const mailOptions = {
                 from: process.env.SMTP_FROM,
@@ -177,4 +178,4 @@ class Notifier {
     }
 }
 
-module.exports = new Notifier(); 
+module.exports = Notifier; 
